@@ -107,11 +107,18 @@ class SSLTunnel(SSLConnection):
         return len(self.wbuf) > 0
 
     def write_pump(self):
-        while len(self.wbuf):
-            packet = self.wbuf[:self.options.max_line]
-            buf = struct.pack('>L', len(packet)) + packet
-            self.s.sendall(buf)
-            self.wbuf = self.wbuf[len(packet):]
+        try:
+            while len(self.wbuf):
+                packet = self.wbuf[:self.options.max_line]
+                buf = struct.pack('>L', len(packet)) + packet
+                self.s.sendall(buf)
+                self.wbuf = self.wbuf[len(packet):]
+        except ssl.SSLError as error:
+            if error.args[0] == ssl.SSL_ERROR_WANT_WRITE:
+                # In Python 3.5+, SSLSocket.send raises this if the socket is
+                # not currently able to write. Handle this just like an
+                # EWOULDBLOCK socket error.
+                logging.error("Would block, requeueing frame")
 
     def close(self):
         self.s.close()

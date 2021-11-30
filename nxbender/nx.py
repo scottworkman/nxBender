@@ -33,7 +33,7 @@ def prompt_for_response(options, prompt_string):
             raise
         else:
             # fall back to terminal prompt
-            return input(prompt_string + ' ')
+            return input(prompt_string + '\n').strip()
 
     def expect(prefix):
         line = proc.stdout.readline().strip('\n')
@@ -86,7 +86,7 @@ class NXSession(object):
             self.session.mount('https://', FingerprintAdapter(self.options.fingerprint))
 
         self.session.headers = {
-                'User-Agent': 'Dell SonicWALL NetExtender for Linux 8.1.789',
+                'User-Agent': 'Dell SonicWALL NetExtender for Linux 10.2.824',
         }
 
         logging.info("Logging in...")
@@ -102,27 +102,52 @@ class NXSession(object):
         logging.info("Dialing up tunnel...")
         self.tunnel()
 
-    def login(self, username, password, domain, extra_data={}):
+    def otp_login(self, data={}, headers={}):
+        resp = self.session.post('https://%s/cgi-bin/otpLogin' % self.host,
+                                 data=data,
+                                 headers=headers,
+                                )
+
+        message = resp.headers.get('X-NE-Message', None)
+        message = resp.headers.get('X-NE-message', message)
+
+        two_factor = resp.headers.get('X-NE-tfresult', None)
+        if two_factor not in [None, '0']:
+            raise IOError("Some issue with two-factor auth: '%s'" % two_factor)
+
+        if message:
+            logging.error('Server returned error: "%s"' % message)
+            sys.exit(1)
+
+        atexit.register(self.logout)
+
+    def login(self, username, password, domain, extra_data={}, extra_headers={}):
         data = {
                 'username': username,
                 'password': password,
                 'domain': domain,
                 'login': 'true',
                 }
+        headers={
+            'X-NE-SESSIONPROMPT': 'true',
+        }
         data.update(extra_data)
+        headers.update(extra_headers)
 
         resp = self.session.post('https://%s/cgi-bin/userLogin' % self.host,
                                  data=data,
-                                 headers={
-                                     'X-NE-SESSIONPROMPT': 'true',
-                                 },
+                                 headers=headers,
                                 )
 
         message = resp.headers.get('X-NE-Message', None)
         message = resp.headers.get('X-NE-message', message)
 
         two_factor = resp.headers.get('X-NE-tf', None)
-        if two_factor == '5':
+        if two_factor == '1':
+            logging.info('2FA required, prompting for response')
+            response = prompt_for_response(self.options, message)
+            return self.otp_login(data={"password": response})
+        elif two_factor == '5':
             logging.info('2FA required, prompting for response')
             response = prompt_for_response(self.options, message)
             return self.login(username, password, domain, extra_data={
@@ -181,7 +206,8 @@ class NXSession(object):
                 continue
 
             try:
-                key, value = line.split(' = ', 1)
+                key, value = [x.strip() for x in line.split('=', 1)]
+                value = value.replace('"', '').replace(';', '')
             except ValueError:
                 logging.warn("Unexpected line in session start message: '%s'" % line)
 
